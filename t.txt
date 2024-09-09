@@ -1,0 +1,127 @@
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
+import pandas as pd
+
+def get_review_page_url(product_url):
+    chrome_driver_path = "./chromedriver.exe"
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--disable-gpu')
+    driver = webdriver.Chrome(service=Service(chrome_driver_path), options=options)
+
+    try:
+        driver.get(product_url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'a[data-hook="see-all-reviews-link-foot"]')))
+        html_data = BeautifulSoup(driver.page_source, 'html.parser')
+
+        reviews_link = html_data.find('a', {'data-hook': 'see-all-reviews-link-foot'})
+        reviews_url = 'https://www.amazon.in' + reviews_link['href'] if reviews_link else None
+    finally:
+        driver.quit()
+
+    return reviews_url
+
+def scrape_amazon_reviews(reviews_url):
+    chrome_driver_path = "./chromedriver.exe"
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--disable-gpu')
+    driver = webdriver.Chrome(service=Service(chrome_driver_path), options=options)
+
+    names = []
+    ratings = []
+    rating_dates = []
+    titles = []
+    reviews_text = []
+
+    rating_distribution = {'5 star': 0, '4 star': 0, '3 star': 0, '2 star': 0, '1 star': 0}
+    total_reviews = None
+
+
+    try:
+        driver.get(reviews_url)
+
+        while True:
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-hook='review']")))
+            html_data = BeautifulSoup(driver.page_source, 'html.parser')
+
+            # Scrape review text
+            reviews = html_data.find_all('div', {'data-hook': 'review'})
+            for review in reviews:
+                name = review.find('span', {'class': 'a-profile-name'}).text
+                names.append(name.strip())
+
+                rating = review.find('span', {'class': 'a-icon-alt'}).text
+                ratings.append(rating)
+
+                rating_date = review.find('span', {'data-hook': 'review-date'}).text
+                rating_dates.append(rating_date)
+
+                title = review.find('a', {'data-hook': 'review-title'}).text
+                titles.append(title)
+
+                review_body = review.find('span', {'data-hook': 'review-body'})
+                review_text = review_body.get_text(separator=" ").strip() if review_body else ""
+                reviews_text.append(review_text)
+            
+            # Scrape rating distribution
+            histogram_columns = html_data.find_all('span', {'class': 'histogram-column-space'})
+            for index, column in enumerate(histogram_columns):
+                percentage = column.text.strip()
+                if percentage:
+                    star_rating = 5 - index  # 5 star is first, 1 star is last
+                    if star_rating<=0:
+                        rating_distribution[f'{star_rating+5} star'] = percentage
+            rating_distribution=dict(list(rating_distribution.items())[:5])            
+            # Scrape total review count
+            review_count_div = html_data.find('div', {'data-hook': 'total-review-count'})
+            if review_count_div:
+                total_reviews_text = review_count_div.get_text(strip=True)
+                total_reviews = int(total_reviews_text.split(' ')[0].replace(',', ''))
+            
+
+            # Check for next page
+            next_button = html_data.find('li', {'class': 'a-last'})
+            if next_button is None or not next_button.find('a'):
+                break  # No more pages
+            next_page_url = 'https://www.amazon.in' + next_button.find('a')['href']
+            driver.get(next_page_url)
+    finally:
+        driver.quit()
+
+    rating_distribution_df = pd.DataFrame(list(rating_distribution.items()), columns=['Rating', 'Percentage'])
+    review_count_df = pd.DataFrame({'Total Reviews': [total_reviews]})
+
+    return pd.DataFrame({
+        'profile_name': names,
+        'rating': ratings,
+        'rating_date': rating_dates,
+        'title': titles,
+        'review_text': reviews_text
+    }), rating_distribution_df, review_count_df
+
+    # return pd.DataFrame({'review_text': reviews_text})
+
+if name == "main":
+    url = "https://www.amazon.in/Phool-Mosquito-Repellent-Incense-Fragrances/dp/B08CMWTNFL/?encoding=UTF8&pd_rd_w=CW5N7&content-id=amzn1.sym.a5732061-004b-4ff1-a68e-13595ee4634a&pf_rd_p=a5732061-004b-4ff1-a68e-13595ee4634a&pf_rd_r=A5GME2RFN7SEV7A8PRZ1&pd_rd_wg=OBgGP&pd_rd_r=e196e7a6-45c5-47a4-b49b-7288ea27ce60&ref=pd_hp_d_btf_LPDEALS"
+    review_page_url = get_review_page_url(url)
+    
+    if review_page_url:
+        # Unpack the returned tuple into three DataFrames
+        reviews_df, rating_distribution_df, review_count_df = scrape_amazon_reviews(review_page_url)
+        
+        # Save each DataFrame to a separate CSV file
+        reviews_df.to_csv('amazon_reviews.csv', index=False)
+        rating_distribution_df.to_csv('amazon_rating_distribution.csv', index=False)
+        review_count_df.to_csv('amazon_review_count.csv', index=False)
+        
+        print("Reviews saved to amazon_reviews.csv")
+        print("Rating distribution saved to amazon_rating_distribution.csv")
+        print("Total review count saved to amazon_review_count.csv")
+    else:
+        print("Could not find the review page URL.")
